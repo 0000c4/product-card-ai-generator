@@ -1,6 +1,6 @@
 "use server";
 
-import { generateCardImage, generateCardImageWithReferences } from "@/services/image-generator";
+import { generateCardImage, generateCardImageWithProduct } from "@/services/image-generator";
 import type { ImageModel, ImageQuality, OutputFormat, BackgroundOption } from "@/types";
 
 export async function generateCard(formData: FormData) {
@@ -19,15 +19,6 @@ export async function generateCard(formData: FormData) {
   }
 
   try {
-    // Check for reference images
-    const referenceFiles: File[] = [];
-    for (let i = 0; i < 4; i++) {
-      const file = formData.get(`reference_${i}`) as File | null;
-      if (file && file.size > 0) {
-        referenceFiles.push(file);
-      }
-    }
-
     const params = {
       productName,
       description,
@@ -40,16 +31,24 @@ export async function generateCard(formData: FormData) {
       background,
     };
 
+    // Check for product image
+    const productImageFile = formData.get("productImage") as File | null;
+    const hasProductImage = productImageFile && productImageFile.size > 0;
+
     let result;
-    if (referenceFiles.length > 0) {
-      // Read files into buffers on server
-      const buffers = await Promise.all(
-        referenceFiles.map(async (file) => {
+    if (hasProductImage) {
+      // Collect reference images
+      const referenceFiles: Buffer[] = [];
+      for (let i = 0; i < 4; i++) {
+        const file = formData.get(`reference_${i}`) as File | null;
+        if (file && file.size > 0) {
           const arrayBuffer = await file.arrayBuffer();
-          return Buffer.from(arrayBuffer);
-        })
-      );
-      result = await generateCardImageWithReferences(params, buffers);
+          referenceFiles.push(Buffer.from(arrayBuffer));
+        }
+      }
+
+      const productBuffer = Buffer.from(await productImageFile!.arrayBuffer());
+      result = await generateCardImageWithProduct(params, productBuffer, referenceFiles);
     } else {
       result = await generateCardImage(params);
     }

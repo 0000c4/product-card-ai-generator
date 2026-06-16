@@ -15,7 +15,7 @@ interface OpenAIResponse {
   };
 }
 
-function buildPrompt(params: CardGenerationParams): string {
+function buildPrompt(params: CardGenerationParams, hasProductImage: boolean): string {
   const lines: string[] = [
     `Create a professional marketplace product card for "${params.productName}".`,
     `Product description: ${params.description}`,
@@ -39,6 +39,15 @@ function buildPrompt(params: CardGenerationParams): string {
     "- No placeholder or dummy text"
   );
 
+  if (hasProductImage) {
+    lines.push(
+      "",
+      "IMPORTANT — Image roles:",
+      "The FIRST image is the PRODUCT ITSELF. Create a card featuring THIS EXACT product as the main subject.",
+      "All subsequent images are style/composition/color references only — do NOT place them as separate products in the card."
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -56,6 +65,22 @@ function saveImage(b64: string): string {
   return `/uploads/${filename}`;
 }
 
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 180_000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      keepalive: true,
+    });
+    return response;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function generateCardImage(
   params: CardGenerationParams
 ): Promise<CardGenerationResult> {
@@ -63,7 +88,7 @@ export async function generateCardImage(
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  const prompt = buildPrompt(params);
+  const prompt = buildPrompt(params, false);
 
   const body: Record<string, unknown> = {
     model: params.model,
@@ -75,7 +100,7 @@ export async function generateCardImage(
     background: params.background,
   };
 
-  const response = await fetch(`${API_BASE}/images/generations`, {
+  const response = await fetchWithTimeout(`${API_BASE}/images/generations`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -105,15 +130,16 @@ export async function generateCardImage(
   };
 }
 
-export async function generateCardImageWithReferences(
+export async function generateCardImageWithProduct(
   params: CardGenerationParams,
+  productImage: Buffer,
   referenceImages: Buffer[]
 ): Promise<CardGenerationResult> {
   if (!API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  const prompt = buildPrompt(params);
+  const prompt = buildPrompt(params, true);
 
   const formData = new FormData();
 
@@ -121,14 +147,18 @@ export async function generateCardImageWithReferences(
   formData.append("prompt", prompt);
   formData.append("n", "1");
 
-  // Append each reference image (up to 4)
-  const maxImages = referenceImages.slice(0, 4);
-  for (const img of maxImages) {
-    const blob = new Blob([new Uint8Array(img)], { type: "image/png" });
-    formData.append("image[]", blob);
+  // First image = the product itself
+  const productBlob = new Blob([new Uint8Array(productImage)], { type: "image/png" });
+  formData.append("image[]", productBlob);
+
+  // Subsequent images = style/composition references only (up to 4)
+  const maxRefs = referenceImages.slice(0, 4);
+  for (const ref of maxRefs) {
+    const refBlob = new Blob([new Uint8Array(ref)], { type: "image/png" });
+    formData.append("image[]", refBlob);
   }
 
-  const response = await fetch(`${API_BASE}/images/edits`, {
+  const response = await fetchWithTimeout(`${API_BASE}/images/edits`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${API_KEY}`,

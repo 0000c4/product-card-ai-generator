@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Sparkles, Download, Loader2, X, ImageIcon } from "lucide-react";
+import { Sparkles, Download, Loader2, X, ImageIcon, Upload } from "lucide-react";
 import Image from "next/image";
 import type { ImageModel } from "@/types";
 
@@ -83,7 +83,26 @@ export function CardGeneratorForm() {
     error?: string;
   } | null>(null);
 
+  const [productImage, setProductImage] = useState<ReferencePreview | null>(null);
   const [references, setReferences] = useState<ReferencePreview[]>([]);
+
+  function handleProductImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) {
+      // Revoke previous preview
+      if (productImage) URL.revokeObjectURL(productImage.preview);
+      const preview = URL.createObjectURL(file);
+      setProductImage({ file, preview });
+    }
+    e.target.value = "";
+  }
+
+  function removeProductImage() {
+    if (productImage) {
+      URL.revokeObjectURL(productImage.preview);
+      setProductImage(null);
+    }
+  }
 
   function handleReferenceUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files || []);
@@ -95,7 +114,6 @@ export function CardGeneratorForm() {
       setReferences((prev) => [...prev, { file, preview }]);
     }
 
-    // Reset input so same file can be re-selected
     e.target.value = "";
   }
 
@@ -110,7 +128,12 @@ export function CardGeneratorForm() {
   async function handleSubmit(formData: FormData) {
     setResult(null);
 
-    // Append reference files to form data
+    // Append product image
+    if (productImage) {
+      formData.append("productImage", productImage.file);
+    }
+
+    // Append reference files
     references.forEach((ref, i) => {
       formData.append(`reference_${i}`, ref.file);
     });
@@ -159,6 +182,51 @@ export function CardGeneratorForm() {
               name="style"
               placeholder="e.g. minimal, bold, luxury"
             />
+          </div>
+
+          {/* Product Image */}
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2 text-base font-semibold">
+              <Upload className="h-4 w-4" />
+              Product Image
+              <span className="text-xs font-normal text-zinc-500">(optional)</span>
+            </Label>
+            {productImage ? (
+              <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border-2 border-zinc-300 dark:border-zinc-700">
+                <Image
+                  src={productImage.preview}
+                  alt="Product"
+                  fill
+                  className="object-contain"
+                />
+                <button
+                  type="button"
+                  onClick={removeProductImage}
+                  className="absolute right-2 top-2 rounded-md bg-black/60 p-1.5 text-white hover:bg-black/80"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            ) : (
+              <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-300 p-10 hover:border-zinc-400 dark:border-zinc-700 dark:hover:border-zinc-500">
+                <Upload className="h-8 w-8 text-zinc-400" />
+                <span className="text-sm font-medium text-zinc-500">
+                  Click to upload product photo
+                </span>
+                <span className="text-xs text-zinc-400">
+                  PNG, JPEG or WebP
+                </span>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="hidden"
+                  onChange={handleProductImageUpload}
+                />
+              </label>
+            )}
+            <p className="text-xs text-zinc-500">
+              This photo will be used as the MAIN product in the generated card
+            </p>
           </div>
 
           {/* Model */}
@@ -282,7 +350,7 @@ export function CardGeneratorForm() {
               )}
             </div>
             <p className="text-xs text-zinc-500">
-              Upload product photos as visual references for the AI
+              Additional style references for the AI
             </p>
           </div>
 
