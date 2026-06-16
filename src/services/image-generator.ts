@@ -1,9 +1,12 @@
 import fs from "fs";
 import path from "path";
 import type { CardGenerationParams, CardGenerationResult } from "@/types";
+import { analyzeReferenceImages, generateCreativePrompt } from "./prompt-generator";
+import { validateGeneratedImage } from "./validation";
 
 const API_BASE = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const API_KEY = process.env.OPENAI_API_KEY;
+const MAX_RETRIES = 3;
 
 interface OpenAIResponse {
   data: Array<{ b64_json?: string }>;
@@ -13,42 +16,6 @@ interface OpenAIResponse {
     output_tokens: number;
     total_tokens: number;
   };
-}
-
-function buildPrompt(params: CardGenerationParams, hasProductImage: boolean): string {
-  const lines: string[] = [
-    `Create a professional marketplace product card for "${params.productName}".`,
-    `Product description: ${params.description}`,
-  ];
-
-  if (params.price) {
-    lines.push(`Price: ${params.price}`);
-  }
-
-  const style = params.style || "modern marketplace product card";
-  lines.push(`Overall style: ${style}`);
-
-  lines.push(
-    "Requirements:",
-    "- Clean white or gradient background",
-    "- Professional product presentation",
-    "- Include product name text overlay",
-    "- Modern e-commerce aesthetic",
-    "- Marketplace-ready design (Wildberries/Ozon style)",
-    "- High resolution, crisp quality",
-    "- No placeholder or dummy text"
-  );
-
-  if (hasProductImage) {
-    lines.push(
-      "",
-      "IMPORTANT — Image roles:",
-      "The FIRST image is the PRODUCT ITSELF. Create a card featuring THIS EXACT product as the main subject.",
-      "All subsequent images are style/composition/color references only — do NOT place them as separate products in the card."
-    );
-  }
-
-  return lines.join("\n");
 }
 
 function saveImage(b64: string): string {
@@ -65,7 +32,7 @@ function saveImage(b64: string): string {
   return `/uploads/${filename}`;
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 180_000): Promise<Response> {
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 300_000): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -81,53 +48,147 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 1
   }
 }
 
+async function callImageGenerationApi(
+  prompt: string,
+  params: CardGenerationParams,
+  productImage: Buffer | null,
+  referenceImages: Buffer[]
+): Promise<OpenAIResponse> {
+  if (productImage) {
+    // Use /v1/images/edits with product image + references
+    const formData = new FormData();
+    formData.append("model", params.model);
+    formData.append("prompt", prompt);
+    formData.append("n", "1");
+
+    const productBlob = new Blob([new Uint8Array(productImage)], { type: "image/png" });
+    formData.append("image[]", productBlob);
+
+    const maxRefs = referenceImages.slice(0, 4);
+    for (const ref of maxRefs) {
+      const refBlob = new Blob([new Uint8Array(ref)], { type: "image/png" });
+      formData.append("image[]", refBlob);
+    }
+
+    const response = await fetchWithTimeout(`${API_BASE}/images/edits`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API error ${response.status}: ${errorText}`);
+    }
+
+    return response.json();
+  } else {
+    // Use /v1/images/generations
+    const body: Record<string, unknown> = {
+      model: params.model,
+      prompt,
+      n: 1,
+      size: params.size,
+      quality: params.quality,
+      output_format: params.outputFormat,
+      background: params.background,
+    };
+
+    const response = await fetchWithTimeout(`${API_BASE}/images/generations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API error ${response.status}: ${errorText}`);
+    }
+
+    return response.json();
+  }
+}
+
 export async function generateCardImage(
-  params: CardGenerationParams
+  params: CardGenerationParams,
+  productImage?: Buffer,
+  referenceImages?: Buffer[]
 ): Promise<CardGenerationResult> {
   if (!API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  const prompt = buildPrompt(params, false);
+  const refs = referenceImages || [];
 
-  const body: Record<string, unknown> = {
-    model: params.model,
-    prompt,
-    n: 1,
-    size: params.size,
-    quality: params.quality,
-    output_format: params.outputFormat,
-    background: params.background,
-  };
+  // Step 2 + 3: Analyze reference images (if any) and generate creative prompt
+  const referenceAnalysis = await analyzeReferenceImages(refs, params.productName);
+  let prompt = await generateCreativePrompt(
+    params.productName,
+    params.description,
+    params.price,
+    params.style,
+    referenceAnalysis,
+    params.background
+  );
 
-  const response = await fetchWithTimeout(`${API_BASE}/images/generations`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let lastError: string | undefined;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API error ${response.status}: ${errorText}`);
+  // Step 4: Retry loop with validation
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    console.log(`Generation attempt ${attempt + 1}/${MAX_RETRIES} for "${params.productName}"`);
+
+    // Generate image
+    const data = await callImageGenerationApi(prompt, params, productImage || null, refs);
+    const b64 = data.data?.[0]?.b64_json;
+
+    if (!b64) {
+      throw new Error("No image generated in response");
+    }
+
+    // Validate generated image with Vision
+    const imageBuffer = Buffer.from(b64, "base64");
+    const validation = await validateGeneratedImage(imageBuffer, prompt, params.productName);
+
+    if (validation.passed) {
+      // Save and return
+      const imageUrl = saveImage(b64);
+      return {
+        imageUrl,
+        prompt,
+        usage: data.usage,
+        retries: attempt,
+      };
+    }
+
+    console.log(
+      `Attempt ${attempt + 1} failed validation:`,
+      validation.issues.join(", ")
+    );
+
+    // Failed — prepare for retry
+    lastError = validation.issues.join("; ");
+
+    if (attempt < MAX_RETRIES - 1) {
+      // Use the retry prompt from validation, or append improvement suggestion
+      if (validation.retryPrompt) {
+        prompt = validation.retryPrompt;
+      } else if (validation.improvementSuggestion) {
+        prompt = `${prompt}\n\nIMPROVEMENT: ${validation.improvementSuggestion}`;
+      } else {
+        prompt = `${prompt}\n\nIMPROVEMENT: Ensure text is clearly readable with no artifacts or distortions. Make the product card look professional and marketplace-ready.`;
+      }
+    }
   }
 
-  const data: OpenAIResponse = await response.json();
-  const b64 = data.data?.[0]?.b64_json;
-
-  if (!b64) {
-    throw new Error("No image generated in response");
-  }
-
-  const imageUrl = saveImage(b64);
-
-  return {
-    imageUrl,
-    prompt,
-    usage: data.usage,
-  };
+  // All retries exhausted — save last result anyway
+  throw new Error(
+    `Failed to generate acceptable card after ${MAX_RETRIES} attempts. Last issues: ${lastError || "unknown"}`
+  );
 }
 
 export async function generateCardImageWithProduct(
@@ -135,54 +196,6 @@ export async function generateCardImageWithProduct(
   productImage: Buffer,
   referenceImages: Buffer[]
 ): Promise<CardGenerationResult> {
-  if (!API_KEY) {
-    throw new Error("OPENAI_API_KEY is not configured");
-  }
-
-  const prompt = buildPrompt(params, true);
-
-  const formData = new FormData();
-
-  formData.append("model", params.model);
-  formData.append("prompt", prompt);
-  formData.append("n", "1");
-
-  // First image = the product itself
-  const productBlob = new Blob([new Uint8Array(productImage)], { type: "image/png" });
-  formData.append("image[]", productBlob);
-
-  // Subsequent images = style/composition references only (up to 4)
-  const maxRefs = referenceImages.slice(0, 4);
-  for (const ref of maxRefs) {
-    const refBlob = new Blob([new Uint8Array(ref)], { type: "image/png" });
-    formData.append("image[]", refBlob);
-  }
-
-  const response = await fetchWithTimeout(`${API_BASE}/images/edits`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API error ${response.status}: ${errorText}`);
-  }
-
-  const data: OpenAIResponse = await response.json();
-  const b64 = data.data?.[0]?.b64_json;
-
-  if (!b64) {
-    throw new Error("No image generated in response");
-  }
-
-  const imageUrl = saveImage(b64);
-
-  return {
-    imageUrl,
-    prompt,
-    usage: data.usage,
-  };
+  // Delegates to the unified function
+  return generateCardImage(params, productImage, referenceImages);
 }

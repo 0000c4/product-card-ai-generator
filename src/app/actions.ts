@@ -1,6 +1,6 @@
 "use server";
 
-import { generateCardImage, generateCardImageWithProduct } from "@/services/image-generator";
+import { generateCardImage } from "@/services/image-generator";
 import type { ImageModel, ImageQuality, OutputFormat, BackgroundOption } from "@/types";
 
 export async function generateCard(formData: FormData) {
@@ -35,23 +35,27 @@ export async function generateCard(formData: FormData) {
     const productImageFile = formData.get("productImage") as File | null;
     const hasProductImage = productImageFile && productImageFile.size > 0;
 
-    let result;
-    if (hasProductImage) {
-      // Collect reference images
-      const referenceFiles: Buffer[] = [];
-      for (let i = 0; i < 4; i++) {
-        const file = formData.get(`reference_${i}`) as File | null;
-        if (file && file.size > 0) {
-          const arrayBuffer = await file.arrayBuffer();
-          referenceFiles.push(Buffer.from(arrayBuffer));
-        }
+    // Collect reference images
+    const referenceFiles: Buffer[] = [];
+    for (let i = 0; i < 4; i++) {
+      const file = formData.get(`reference_${i}`) as File | null;
+      if (file && file.size > 0) {
+        const arrayBuffer = await file.arrayBuffer();
+        referenceFiles.push(Buffer.from(arrayBuffer));
       }
-
-      const productBuffer = Buffer.from(await productImageFile!.arrayBuffer());
-      result = await generateCardImageWithProduct(params, productBuffer, referenceFiles);
-    } else {
-      result = await generateCardImage(params);
     }
+
+    let productBuffer: Buffer | undefined;
+    if (hasProductImage) {
+      productBuffer = Buffer.from(await productImageFile!.arrayBuffer());
+    }
+
+    // Call unified pipeline (creative prompt + generation + validation + retry)
+    const result = await generateCardImage(
+      params,
+      productBuffer,
+      referenceFiles.length > 0 ? referenceFiles : undefined
+    );
 
     return { success: true, ...result };
   } catch (error) {

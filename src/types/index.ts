@@ -18,6 +18,7 @@ export interface CardGenerationParams {
 export interface CardGenerationResult {
   imageUrl: string;
   prompt: string;
+  retries?: number;
   usage?: {
     prompt_tokens: number;
     image_input_tokens: number;
