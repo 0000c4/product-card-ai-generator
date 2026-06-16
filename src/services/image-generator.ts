@@ -6,7 +6,7 @@ import { validateGeneratedImage } from "./validation";
 
 const API_BASE = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const API_KEY = process.env.OPENAI_API_KEY;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 1;
 
 interface OpenAIResponse {
   data: Array<{ b64_json?: string }>;
@@ -40,7 +40,6 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 3
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
-      keepalive: true,
     });
     return response;
   } finally {
